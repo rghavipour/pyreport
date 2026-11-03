@@ -137,6 +137,37 @@ def number_badge_png(digit, px=240):
     return _to_stream(img)
 
 
+def pill_png(text, size_pt=8, fg=FOREST_2, bg=BEIGE, weight=600, height_mm=None,
+             pad_mm=3.0, px_per_mm=24):
+    """Rounded pill with RTL text (badges / tags) — keeps the PDF look in Word
+    and Google Docs where shaded runs/cells can only be square.
+    Returns (stream, width_mm, height_mm)."""
+    font_px = size_pt * 0.3528 * px_per_mm
+    font = ImageFont.truetype(FONT_FILES[weight], int(round(font_px)))
+    probe = ImageDraw.Draw(Image.new("L", (1, 1)))
+    kw = {"direction": "rtl", "language": "fa"}
+    try:
+        bbox = probe.textbbox((0, 0), text, font=font, **kw)
+    except Exception:
+        kw = {}
+        bbox = probe.textbbox((0, 0), text, font=font)
+    tw_px = bbox[2] - bbox[0]
+    h_mm = height_mm or size_pt * 0.3528 * 1.9
+    h = int(round(h_mm * px_per_mm))
+    w = int(round(tw_px + 2 * pad_mm * px_per_mm))
+    s = 3
+    img = Image.new("RGBA", (w * s, h * s), (0, 0, 0, 0))
+    ImageDraw.Draw(img).rounded_rectangle([0, 0, w * s - 1, h * s - 1], radius=h * s // 2,
+                                          fill=_rgb(bg))
+    img = img.resize((w, h), Image.LANCZOS)
+    d = ImageDraw.Draw(img)
+    asc, desc = font.getmetrics()
+    x = (w - tw_px) / 2 - bbox[0]
+    y = (h - (asc + desc)) / 2 + font_px * 0.04
+    d.text((x, y), text, font=font, fill=_rgb(fg), **kw)
+    return _to_stream(img), w / px_per_mm, h / px_per_mm
+
+
 def leaf_png(px=80):
     scale = 4
     s = px * scale
