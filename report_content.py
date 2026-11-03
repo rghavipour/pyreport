@@ -156,12 +156,15 @@ def leaf_png(px=80):
     return _to_stream(img)
 
 
-def fade_line_png(w=1600, h=12):
-    """Section decor line: strong next to the title (right) fading to the left."""
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+def fade_line_png(w=1600, h=12, canvas_h=None):
+    """Section decor line: strong next to the title (right) fading to the left.
+    canvas_h: optional taller transparent canvas with the line in its middle
+    (lets the line share the vertical alignment of the number badge)."""
+    canvas_h = canvas_h or h
+    img = Image.new("RGBA", (w, canvas_h), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     c1, c2 = _rgb(FOREST), _rgb(BORDER)
-    y0, y1 = h // 2 - 1, h // 2 + 1
+    y0, y1 = canvas_h // 2 - 1, canvas_h // 2 + 1
     for x in range(w):
         t = 1 - x / (w - 1)          # 1 at right edge, 0 at left edge
         if t > 0.5:
