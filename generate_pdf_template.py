@@ -1,32 +1,157 @@
+"""Build the weekly report HTML and print it to PDF (A4, 3 pages).
+
+Font: Vazirmatn is embedded into the HTML (base64 @font-face), so the PDF is
+identical on every machine - no internet / system font required.
+
+Chrome lookup order: $CHROME_BIN, Playwright's bundled Chromium, macOS Chrome,
+then chromium / google-chrome on PATH.
+"""
 import base64
+import glob
 import os
+import shutil
 import subprocess
+import sys
+
 import pypdfium2 as pdfium
 from PIL import Image
 
-def get_b64(path):
-    with open(path, 'rb') as f:
-        return base64.b64encode(f.read()).decode('utf-8')
+import report_content as rc
 
-tl_b64 = get_b64('assets/corner_tl.png')
-tr_b64 = get_b64('assets/corner_tr.png')
-br_b64 = get_b64('assets/corner_br.png')
-logo_b64 = get_b64('assets/logo_clean_transparent.png')
-div_b64 = get_b64('assets/botanical_divider_transparent.png')
-paper_b64 = get_b64('assets/paper.jpg')
+os.chdir(rc.BASE_DIR)
+
+OUT_HTML = "weekly_report_psychology.html"
+OUT_PDF = "weekly_report_psychology.pdf"
+
+
+def b64_file(path):
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
+
+
+def b64_stream(stream):
+    return base64.b64encode(stream.getvalue()).decode("ascii")
+
+
+tl_b64 = b64_stream(rc.downscaled(rc.asset("corner_tl.png"), 700))
+tr_b64 = b64_stream(rc.downscaled(rc.asset("corner_tr.png"), 700))
+br_b64 = b64_stream(rc.downscaled(rc.asset("corner_br.png"), 700))
+logo_b64 = b64_stream(rc.downscaled(rc.asset("logo_clean_transparent.png"), 1100))
+div_b64 = b64_file(rc.asset("botanical_divider_transparent.png"))
+paper_b64 = b64_stream(rc.downscaled(rc.asset("paper.jpg"), 1240, fmt="JPEG", quality=82))
+
+font_faces = "\n".join(
+    f"""  @font-face {{
+    font-family: '{rc.FONT_FAMILY}';
+    src: url('data:font/ttf;base64,{b64_file(path)}') format('truetype');
+    font-weight: {weight};
+    font-style: normal;
+  }}"""
+    for weight, path in rc.FONT_FILES.items()
+)
+
+
+# ---------------------------------------------------------------- fragments
+def section_header(num_title):
+    num, title = num_title
+    return f"""
+      <div class="section-header">
+        <span class="section-number">{num}</span>
+        <h2 class="section-title">{title}</h2>
+        <div class="section-decor-line"></div>
+      </div>"""
+
+
+def field(label, flex=1.0, min_h=14):
+    return f"""
+        <div class="field-group" style="flex: {flex};">
+          <div class="field-label-bar"><span class="bullet-leaf"></span><span>{label}</span></div>
+          <div class="writing-area" style="min-height: {min_h}mm;"></div>
+        </div>"""
+
+
+def compact_header(subtitle, tag):
+    return f"""
+    <div class="header-compact">
+      <div class="header-compact-title">{rc.DOC_TITLE}<span class="hc-sep">|</span>{subtitle}</div>
+      <div class="header-compact-meta">
+        <span>{rc.INSTITUTION}</span>
+        <span class="hc-dot"></span>
+        <span class="header-compact-tag">{tag}</span>
+      </div>
+    </div>"""
+
+
+def footer(idx):
+    right, center, badge = rc.FOOTERS[idx]
+    return f"""
+    <div class="page-footer">
+      <div class="footer-side">{right}</div>
+      <div class="footer-center">{center}</div>
+      <div class="footer-side footer-end"><span class="footer-badge">{badge}</span></div>
+    </div>"""
+
+
+def member_card(num):
+    fields = "".join(
+        field(lbl, flex=f, min_h=h)
+        for lbl, f, h in zip(rc.MEMBER_FIELDS, (1.15, 1, 1), (18, 15, 15))
+    )
+    return f"""
+      <div class="member-card">
+        <div class="member-card-header">
+          <div class="member-name-row">
+            <span class="member-name-label">{rc.MEMBER_NAME}</span>
+            <div class="member-name-fill"></div>
+          </div>
+          <span class="member-badge">عضو شماره {num}</span>
+        </div>
+        <div class="member-fields">{fields}
+        </div>
+      </div>"""
+
+
+meta_rows = "".join(
+    f"""
+        <div class="meta-field"><span class="meta-label">{a}</span><div class="meta-line"></div></div>
+        <div class="meta-field"><span class="meta-label">{b}</span><div class="meta-line"></div></div>"""
+    for a, b in rc.SEC1_FIELDS
+)
+
+plan_head = "".join(
+    f'<th class="{c}">{h}</th>'
+    for h, c in zip(rc.PLAN_HEADERS, ("col-num", "col-act", "col-own", "col-time"))
+)
+plan_body = "".join(
+    f'<tr><td class="col-num">{n}</td><td></td><td></td><td></td></tr>' for n in rc.PLAN_ROWS
+)
+
+sign_boxes = "".join(
+    f"""
+      <div class="sign-box">
+        <div>
+          <div class="sign-title"><span class="bullet-leaf"></span><span>{s['title']}</span></div>
+          <div class="sign-desc">{s['desc']}</div>
+        </div>
+        <div class="sign-notes-box">{s['notes']}</div>
+        <div class="sign-area-line"><span>{s['name']}</span><span>{s['sign']}</span></div>
+      </div>"""
+    for s in rc.SIGN_BOXES
+)
+
+C = {k: "#" + getattr(rc, k) for k in
+     ("FOREST", "FOREST_2", "SAGE", "BEIGE", "BORDER", "BORDER_SOFT", "IVORY",
+      "CARD", "FIELD", "MUTED", "DARK_TEXT", "LINE_DOT")}
 
 html_content = f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
 <meta charset="utf-8">
-<title>گزارش هفتگی گروه‌ها - مرکز سلامت روان</title>
+<title>{rc.DOC_TITLE} - {rc.INSTITUTION}</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap');
+{font_faces}
 
-  @page {{
-    size: A4 portrait;
-    margin: 0;
-  }}
+  @page {{ size: A4 portrait; margin: 0; }}
 
   * {{
     box-sizing: border-box;
@@ -37,65 +162,30 @@ html_content = f"""<!DOCTYPE html>
   body {{
     margin: 0;
     padding: 0;
-    font-family: 'Vazirmatn', Tahoma, sans-serif;
-    color: #294B40;
-    background-color: #FAF9F4;
+    font-family: '{rc.FONT_FAMILY}', Tahoma, sans-serif;
+    color: {C['FOREST']};
+    background-color: {C['IVORY']};
     direction: rtl;
     text-align: right;
-    font-feature-settings: "ss01";
   }}
 
   .page {{
     width: 210mm;
     height: 297mm;
     position: relative;
-    padding: 15mm 18mm 14mm 18mm;
+    padding: 14mm 18mm 12mm 18mm;
     page-break-after: always;
-    page-break-inside: avoid;
+    break-after: page;
     overflow: hidden;
-    background: #FAF9F4 url('data:image/jpeg;base64,{paper_b64}') repeat;
-    background-size: cover;
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
+    background: {C['IVORY']} url('data:image/jpeg;base64,{paper_b64}') no-repeat center / cover;
   }}
+  .page:last-child {{ page-break-after: auto; break-after: auto; }}
 
-  .page:last-child {{
-    page-break-after: auto;
-  }}
+  .corner {{ position: absolute; pointer-events: none; z-index: 1; }}
+  .corner-tl {{ top: 0; left: 0; }}
+  .corner-tr {{ top: 0; right: 0; }}
+  .corner-br {{ bottom: 0; right: 0; }}
 
-  /* Botanical Corner Accents */
-  .corner-tl {{
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 46mm;
-    pointer-events: none;
-    z-index: 1;
-    opacity: 0.85;
-  }}
-
-  .corner-tr {{
-    position: absolute;
-    top: 0;
-    right: 0;
-    width: 44mm;
-    pointer-events: none;
-    z-index: 1;
-    opacity: 0.85;
-  }}
-
-  .corner-br {{
-    position: absolute;
-    bottom: 0;
-    right: 0;
-    width: 46mm;
-    pointer-events: none;
-    z-index: 1;
-    opacity: 0.85;
-  }}
-
-  /* Content Wrapper */
   .content-container {{
     position: relative;
     z-index: 2;
@@ -104,168 +194,94 @@ html_content = f"""<!DOCTYPE html>
     flex-direction: column;
   }}
 
-  /* Header Section */
-  .header-main {{
-    text-align: center;
-    margin-bottom: 2mm;
-  }}
+  /* ---------- Page 1 header ---------- */
+  .header-main {{ text-align: center; margin-bottom: 1mm; }}
+  .logo-img {{ height: 25mm; max-width: 90%; object-fit: contain; display: block; margin: 0 auto 1mm; }}
+  .institution-name {{ font-size: 10.5pt; font-weight: 500; color: #5D7A68; margin: 0 0 0.5mm; }}
+  .document-title {{ font-size: 21pt; font-weight: 800; color: {C['FOREST']}; margin: 0; line-height: 1.35; }}
+  .document-subtitle {{ font-size: 8.5pt; font-weight: 400; color: #7A8F82; margin: 0.5mm 0 1.5mm; }}
+  .botanical-divider {{ text-align: center; margin: 0 0 3mm; line-height: 0; }}
+  .botanical-divider img {{ height: 4.5mm; width: 65%; object-fit: contain; opacity: 0.75; }}
 
-  .logo-wrapper {{
-    text-align: center;
-    margin-bottom: 1mm;
-  }}
-
-  .logo-img {{
-    height: 26mm;
-    max-width: 90%;
-    object-fit: contain;
-  }}
-
-  .institution-name {{
-    font-size: 11pt;
-    font-weight: 500;
-    color: #5D7A68;
-    letter-spacing: 0.5px;
-    margin: 0 0 1mm 0;
-  }}
-
-  .document-title {{
-    font-size: 21pt;
-    font-weight: 800;
-    color: #294B40;
-    margin: 0;
-    letter-spacing: -0.5px;
-  }}
-
-  .document-subtitle {{
-    font-size: 8.5pt;
-    font-weight: 400;
-    color: #7A8F82;
-    margin: 1mm 0 2mm 0;
-  }}
-
-  .botanical-divider {{
-    text-align: center;
-    margin: 1mm 0 3mm 0;
-    line-height: 0;
-  }}
-
-  .botanical-divider img {{
-    height: 4.5mm;
-    width: 65%;
-    object-fit: contain;
-    opacity: 0.75;
-  }}
-
-  /* Compact Header for Pages 2 & 3 */
+  /* ---------- Compact header (pages 2 & 3): centered, never wraps the meta ---------- */
   .header-compact {{
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    border-bottom: 1px solid #D5DEC9;
-    padding-bottom: 2.2mm;
-    margin-bottom: 3.5mm;
+    text-align: center;
+    border-bottom: 1px solid {C['BORDER']};
+    padding-bottom: 2.5mm;
+    margin-bottom: 4mm;
   }}
-
   .header-compact-title {{
-    font-size: 12pt;
-    font-weight: 700;
-    color: #294B40;
+    font-size: 13.5pt;
+    font-weight: 800;
+    color: {C['FOREST']};
+    line-height: 1.5;
   }}
-
+  .hc-sep {{ color: {C['SAGE']}; font-weight: 400; margin: 0 2.5mm; }}
   .header-compact-meta {{
+    margin-top: 1mm;
     font-size: 8.5pt;
     color: #728779;
     display: flex;
+    justify-content: center;
     align-items: center;
-    gap: 3mm;
+    gap: 2.5mm;
   }}
-
+  .hc-dot {{ width: 1.2mm; height: 1.2mm; border-radius: 50%; background: {C['SAGE']}; display: inline-block; }}
   .header-compact-tag {{
-    background: #EAE5D8;
-    padding: 0.8mm 3mm;
+    background: {C['BEIGE']};
+    padding: 0.5mm 3mm;
     border-radius: 3mm;
     font-size: 7.5pt;
     font-weight: 600;
-    color: #385E4F;
+    color: {C['FOREST_2']};
   }}
 
-  /* Section Styling */
-  .section-block {{
-    margin-bottom: 3mm;
-  }}
+  /* ---------- Sections ---------- */
+  .section-block {{ margin-bottom: 3mm; display: flex; flex-direction: column; }}
+  .section-block.grow {{ flex: 1; min-height: 0; }}
 
-  .section-header {{
+  .section-header {{ display: flex; align-items: center; gap: 2.5mm; margin-bottom: 2mm; }}
+  /* one numbering style everywhere: a perfect circle */
+  .section-number {{
+    flex: 0 0 auto;
+    width: 6.4mm;
+    height: 6.4mm;
+    border-radius: 50%;
+    background: linear-gradient(135deg, {C['FOREST']}, {C['FOREST_2']});
+    color: {C['IVORY']};
+    font-size: 9pt;
+    font-weight: 700;
+    line-height: 1;
     display: flex;
     align-items: center;
-    gap: 2.5mm;
-    margin-bottom: 1.8mm;
+    justify-content: center;
+    padding-top: 0.3mm;
   }}
-
-  .section-number-pill {{
-    background: linear-gradient(135deg, #294B40, #385E4F);
-    color: #FAF9F4;
-    font-size: 8.5pt;
-    font-weight: 700;
-    padding: 0.8mm 3.2mm;
-    border-radius: 4mm;
-    box-shadow: 0 1px 3px rgba(41, 75, 64, 0.15);
-  }}
-
-  .section-title {{
-    font-size: 12pt;
-    font-weight: 700;
-    color: #294B40;
-    margin: 0;
-  }}
-
+  .section-title {{ font-size: 12pt; font-weight: 700; color: {C['FOREST']}; margin: 0; white-space: nowrap; }}
   .section-decor-line {{
     flex: 1;
     height: 1px;
-    background: linear-gradient(to left, #294B40, #D5DEC9, transparent);
-    opacity: 0.5;
+    background: linear-gradient(to left, {C['FOREST']}, {C['BORDER']}, transparent);
+    opacity: 0.55;
   }}
 
-  /* Metadata Card (Section 1) */
+  /* ---------- Meta card ---------- */
   .meta-card {{
-    background: rgba(255, 255, 255, 0.80);
-    border: 1px solid #DFE3D5;
+    background: {C['FIELD']};
+    border: 1px solid {C['BORDER_SOFT']};
     border-radius: 3.5mm;
-    padding: 3mm 4mm;
+    padding: 3mm 4.5mm;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 2.5mm 6mm;
-    box-shadow: 0 1px 4px rgba(41, 75, 64, 0.04);
+    gap: 3mm 8mm;
   }}
+  .meta-field {{ display: flex; align-items: flex-end; gap: 2mm; }}
+  .meta-label {{ font-size: 9.5pt; font-weight: 600; color: {C['FOREST_2']}; white-space: nowrap; min-width: 27mm; }}
+  .meta-line {{ flex: 1; border-bottom: 1px dotted {C['LINE_DOT']}; height: 5mm; }}
 
-  .meta-field {{
-    display: flex;
-    align-items: baseline;
-    gap: 2mm;
-  }}
-
-  .meta-label {{
-    font-size: 9.5pt;
-    font-weight: 600;
-    color: #385E4F;
-    white-space: nowrap;
-    min-width: 25mm;
-  }}
-
-  .meta-line {{
-    flex: 1;
-    border-bottom: 1px dotted #A8B39A;
-    height: 5mm;
-    color: #555;
-    font-size: 9.5pt;
-    padding-right: 2mm;
-  }}
-
-  /* Field Writing Boxes */
-  .field-group {{
-    margin-bottom: 2mm;
-  }}
-
+  /* ---------- Writing boxes: one solid fill everywhere ---------- */
+  .field-group {{ margin-bottom: 2mm; display: flex; flex-direction: column; min-height: 0; }}
+  .field-group:last-child {{ margin-bottom: 0; }}
   .field-label-bar {{
     font-size: 9pt;
     font-weight: 600;
@@ -275,562 +291,212 @@ html_content = f"""<!DOCTYPE html>
     align-items: center;
     gap: 1.5mm;
   }}
-
   .bullet-leaf {{
     width: 2mm;
     height: 2mm;
-    background-color: #89957B;
+    background-color: {C['SAGE']};
     border-radius: 50% 0 50% 0;
     display: inline-block;
+    flex: 0 0 auto;
   }}
-
   .writing-area {{
-    background: rgba(255, 255, 255, 0.70);
-    border: 1px solid #DFE3D5;
+    flex: 1;
+    background: {C['FIELD']};
+    border: 1px solid {C['BORDER_SOFT']};
     border-radius: 3mm;
-    padding: 2.5mm 3.5mm;
-    font-size: 9pt;
-    color: #2A3831;
-    line-height: 1.8;
-    box-shadow: inset 0 1px 2px rgba(41, 75, 64, 0.02);
   }}
 
-  /* Member Card Component */
+  /* ---------- Member card ---------- */
   .member-card {{
-    background: rgba(255, 255, 255, 0.85);
-    border: 1px solid #D5DEC9;
-    border-right: 3.5px solid #294B40;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    background: {C['CARD']};
+    border: 1px solid {C['BORDER']};
+    border-right: 3.5px solid {C['FOREST']};
     border-radius: 3.5mm;
-    padding: 3mm 4mm;
+    padding: 3mm 4mm 3.5mm;
     margin-bottom: 3.5mm;
-    box-shadow: 0 2px 5px rgba(41, 75, 64, 0.03);
   }}
-
+  .member-card:last-child {{ margin-bottom: 0; }}
   .member-card-header {{
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 2mm;
-    padding-bottom: 1.5mm;
-    border-bottom: 1px dashed #DFE3D5;
+    padding-bottom: 1.8mm;
+    border-bottom: 1px dashed {C['BORDER_SOFT']};
   }}
-
-  .member-name-row {{
-    display: flex;
-    align-items: baseline;
-    gap: 2mm;
-    flex: 1;
-  }}
-
-  .member-name-label {{
-    font-size: 9.5pt;
-    font-weight: 700;
-    color: #294B40;
-  }}
-
-  .member-name-fill {{
-    flex: 1;
-    border-bottom: 1px dotted #A8B39A;
-    height: 4.5mm;
-    max-width: 55mm;
-  }}
-
+  .member-name-row {{ display: flex; align-items: flex-end; gap: 2mm; flex: 1; }}
+  .member-name-label {{ font-size: 9.5pt; font-weight: 700; color: {C['FOREST']}; }}
+  .member-name-fill {{ flex: 1; border-bottom: 1px dotted {C['LINE_DOT']}; height: 4.5mm; max-width: 70mm; }}
   .member-badge {{
     font-size: 8pt;
     font-weight: 600;
     color: #5A7463;
-    background: #EAE6DB;
-    padding: 0.8mm 3mm;
+    background: {C['BEIGE']};
+    padding: 0.6mm 3mm;
     border-radius: 2.5mm;
   }}
+  .member-fields {{ flex: 1; display: flex; flex-direction: column; }}
 
-  .member-fields-grid {{
-    display: flex;
-    flex-direction: column;
-    gap: 2mm;
-  }}
-
-  .hint-banner {{
-    font-size: 8pt;
-    color: #5B7263;
-    background: rgba(233, 227, 210, 0.5);
-    border-right: 2.5px solid #89957B;
-    padding: 1.8mm 3.5mm;
-    border-radius: 2mm;
-    margin-bottom: 2.5mm;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }}
-
-  /* Planning Table (Section 5) */
-  .plan-table {{
-    width: 100%;
-    border-collapse: collapse;
-    background: rgba(255, 255, 255, 0.85);
+  /* ---------- Plan table ---------- */
+  .plan-wrap {{
+    border: 1px solid {C['BORDER_SOFT']};
     border-radius: 3mm;
     overflow: hidden;
-    border: 1px solid #DFE3D5;
-    font-size: 8.5pt;
-    box-shadow: 0 1px 4px rgba(41, 75, 64, 0.03);
+    background: {C['FIELD']};
   }}
-
+  .plan-table {{ width: 100%; border-collapse: collapse; font-size: 8.5pt; }}
   .plan-table th {{
-    background: #EAE6DB;
-    color: #294B40;
+    background: {C['BEIGE']};
+    color: {C['FOREST']};
     font-weight: 700;
     padding: 2.2mm 2.5mm;
     border-bottom: 1.5px solid #CBD5BC;
-    border-left: 1px solid #DFE3D5;
+    border-left: 1px solid {C['BORDER_SOFT']};
     text-align: right;
   }}
-
-  .plan-table th:last-child {{
-    border-left: none;
-  }}
-
   .plan-table td {{
-    padding: 2.2mm 2.5mm;
-    border-bottom: 1px solid #EAE6DB;
-    border-left: 1px solid #EAE6DB;
+    height: 9mm;
+    padding: 0 2.5mm;
+    border-bottom: 1px solid {C['BEIGE']};
+    border-left: 1px solid {C['BEIGE']};
     color: #33443C;
-    vertical-align: middle;
   }}
+  .plan-table th:last-child, .plan-table td:last-child {{ border-left: none; }}
+  .plan-table tr:last-child td {{ border-bottom: none; }}
+  .plan-table tbody tr:nth-child(even) td {{ background: {C['CARD']}; }}
+  .plan-table .col-num {{ width: 9%; text-align: center; font-weight: 700; color: {C['FOREST']}; }}
+  .plan-table .col-act {{ width: 47%; }}
+  .plan-table .col-own {{ width: 24%; }}
+  .plan-table .col-time {{ width: 20%; text-align: center; }}
 
-  .plan-table td:last-child {{
-    border-left: none;
-  }}
-
-  .plan-table tr:last-child td {{
-    border-bottom: none;
-  }}
-
-  .plan-table tr:nth-child(even) {{
-    background: rgba(250, 249, 244, 0.7);
-  }}
-
-  /* Signatures Card */
+  /* ---------- Signatures ---------- */
   .sign-card {{
-    background: rgba(255, 255, 255, 0.85);
-    border: 1px solid #D5DEC9;
+    background: {C['CARD']};
+    border: 1px solid {C['BORDER']};
     border-radius: 3.5mm;
     padding: 3.5mm 4.5mm;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 6mm;
-    margin-top: 3.5mm;
-    box-shadow: 0 1px 4px rgba(41, 75, 64, 0.03);
+    gap: 7mm;
   }}
-
-  .sign-box {{
-    display: flex;
-    flex-direction: column;
-    justify-content: space-between;
-    min-height: 24mm;
-  }}
-
-  .sign-title {{
-    font-size: 9pt;
-    font-weight: 700;
-    color: #294B40;
-    margin-bottom: 1mm;
-    display: flex;
-    align-items: center;
-    gap: 1.5mm;
-  }}
-
-  .sign-desc {{
-    font-size: 7.8pt;
-    color: #697F71;
-    margin-bottom: 2mm;
-    line-height: 1.6;
-  }}
-
+  .sign-box {{ display: flex; flex-direction: column; justify-content: space-between; }}
+  .sign-title {{ font-size: 9pt; font-weight: 700; color: {C['FOREST']}; margin-bottom: 1mm; display: flex; align-items: center; gap: 1.5mm; }}
+  .sign-desc {{ font-size: 7.8pt; color: #697F71; margin-bottom: 2mm; line-height: 1.6; }}
   .sign-notes-box {{
-    border: 1px dashed #D5DEC9;
-    background: rgba(250, 249, 244, 0.6);
+    border: 1px dashed {C['BORDER']};
+    background: {C['FIELD']};
     border-radius: 2mm;
-    height: 9mm;
-    margin-bottom: 2mm;
+    height: 16mm;
+    padding: 1.8mm 2.5mm;
+    font-size: 7.5pt;
+    color: #8F9E94;
+    margin-bottom: 2.5mm;
   }}
-
   .sign-area-line {{
-    border-top: 1px dashed #A8B39A;
+    border-top: 1px dashed {C['LINE_DOT']};
     padding-top: 1.8mm;
+    padding-bottom: 6mm;
     display: flex;
     justify-content: space-between;
     font-size: 7.8pt;
     color: #758679;
   }}
 
-  /* Footer Styling */
+  /* ---------- Footer ---------- */
   .page-footer {{
     margin-top: auto;
     padding-top: 2.2mm;
-    border-top: 0.8px solid #DFE3D5;
+    border-top: 0.8px solid {C['BORDER_SOFT']};
     display: flex;
-    justify-content: space-between;
     align-items: center;
     font-size: 7.5pt;
     color: #809687;
-    position: relative;
-    z-index: 3;
   }}
-
-  .footer-center {{
-    font-weight: 500;
-    letter-spacing: 0.3px;
-  }}
-
+  .footer-side {{ flex: 1; }}
+  .footer-end {{ text-align: left; }}
+  .footer-center {{ flex: 0 0 auto; font-weight: 500; text-align: center; padding: 0 4mm; }}
   .footer-badge {{
-    background: #EAE6DB;
-    padding: 0.6mm 2.5mm;
+    background: {C['BEIGE']};
+    padding: 0.6mm 2.8mm;
     border-radius: 2mm;
     font-weight: 600;
     color: #426354;
   }}
+  .spacer {{ height: 3.5mm; flex: 0 0 auto; }}
 </style>
 </head>
 <body>
 
 <!-- ==================== PAGE 1 ==================== -->
 <div class="page">
-  <img src="data:image/png;base64,{tl_b64}" class="corner-tl" alt="botanical-tl">
-  <img src="data:image/png;base64,{tr_b64}" class="corner-tr" alt="botanical-tr">
-  <img src="data:image/png;base64,{br_b64}" class="corner-br" alt="botanical-br">
+  <img src="data:image/png;base64,{tl_b64}" class="corner corner-tl" style="width: 46mm; opacity: .85;" alt="">
+  <img src="data:image/png;base64,{tr_b64}" class="corner corner-tr" style="width: 44mm; opacity: .85;" alt="">
+  <img src="data:image/png;base64,{br_b64}" class="corner corner-br" style="width: 46mm; opacity: .85;" alt="">
 
   <div class="content-container">
-    <!-- Header -->
     <div class="header-main">
-      <div class="logo-wrapper">
-        <img src="data:image/png;base64,{logo_b64}" class="logo-img" alt="لوگوی مرکز سلامت روان">
-      </div>
-      <div class="institution-name">مرکز مشاوره، روانشناسی و سلامت روان</div>
-      <h1 class="document-title">گزارش هفتگی گروه‌ها</h1>
-      <div class="document-subtitle">فرم اختصاصی ارزیابی هفتگی فعالیت‌ها، پایش سلامت تیمی و برنامه‌ریزی یکپارچه</div>
-      <div class="botanical-divider">
-        <img src="data:image/png;base64,{div_b64}" alt="divider">
+      <img src="data:image/png;base64,{logo_b64}" class="logo-img" alt="لوگو">
+      <div class="institution-name">{rc.INSTITUTION}</div>
+      <h1 class="document-title">{rc.DOC_TITLE}</h1>
+      <div class="document-subtitle">{rc.DOC_SUBTITLE}</div>
+      <div class="botanical-divider"><img src="data:image/png;base64,{div_b64}" alt=""></div>
+    </div>
+
+    <div class="section-block">{section_header(rc.SEC1)}
+      <div class="meta-card">{meta_rows}
       </div>
     </div>
 
-    <!-- Section 1: مشخصات گروه -->
-    <div class="section-block">
-      <div class="section-header">
-        <span class="section-number-pill">۱</span>
-        <h2 class="section-title">مشخصات گروه</h2>
-        <div class="section-decor-line"></div>
-      </div>
-      <div class="meta-card">
-        <div class="meta-field">
-          <span class="meta-label">نام گروه:</span>
-          <div class="meta-line"></div>
-        </div>
-        <div class="meta-field">
-          <span class="meta-label">نام سرگروه:</span>
-          <div class="meta-line"></div>
-        </div>
-        <div class="meta-field">
-          <span class="meta-label">بازه زمانی گزارش:</span>
-          <div class="meta-line"></div>
-        </div>
-        <div class="meta-field">
-          <span class="meta-label">تاریخ ارائه:</span>
-          <div class="meta-line"></div>
-        </div>
-      </div>
+    <div class="section-block grow">{section_header(rc.SEC2)}
+      {field(rc.SEC2_FIELDS[0], 1.15, 22)}
+      {field(rc.SEC2_FIELDS[1], 1.0, 18)}
+      {field(rc.SEC2_FIELDS[2], 0.95, 16)}
     </div>
-
-    <!-- Section 2: گزارش عملکرد سرگروه -->
-    <div class="section-block" style="flex: 1; display: flex; flex-direction: column;">
-      <div class="section-header">
-        <span class="section-number-pill">۲</span>
-        <h2 class="section-title">گزارش عملکرد سرگروه</h2>
-        <div class="section-decor-line"></div>
-      </div>
-
-      <div class="field-group" style="flex: 1.15; display: flex; flex-direction: column;">
-        <div class="field-label-bar">
-          <span class="bullet-leaf"></span>
-          <span>اقدامات و فعالیت‌های انجام‌شده:</span>
-        </div>
-        <div class="writing-area" style="flex: 1; min-height: 22mm;"></div>
-      </div>
-
-      <div class="field-group" style="flex: 1; display: flex; flex-direction: column;">
-        <div class="field-label-bar">
-          <span class="bullet-leaf"></span>
-          <span>برنامه‌ها و ایده‌های پیشنهادی:</span>
-        </div>
-        <div class="writing-area" style="flex: 1; min-height: 18mm;"></div>
-      </div>
-
-      <div class="field-group" style="flex: 0.95; display: flex; flex-direction: column;">
-        <div class="field-label-bar">
-          <span class="bullet-leaf"></span>
-          <span>دستاوردها و نتایج:</span>
-        </div>
-        <div class="writing-area" style="flex: 1; min-height: 16mm;"></div>
-      </div>
-    </div>
-
-    <!-- Footer Page 1 -->
-    <div class="page-footer">
-      <div>محرمانه — ویژه ارزیابی داخلی مرکز سلامت روان</div>
-      <div class="footer-center">گزارش هفتگی گروه‌ها</div>
-      <div class="footer-badge">صفحه ۱ از ۳</div>
-    </div>
+{footer(0)}
   </div>
 </div>
 
 <!-- ==================== PAGE 2 ==================== -->
 <div class="page">
-  <img src="data:image/png;base64,{tl_b64}" class="corner-tl" alt="botanical-tl" style="width: 38mm; opacity: 0.7;">
-  <img src="data:image/png;base64,{br_b64}" class="corner-br" alt="botanical-br" style="width: 38mm; opacity: 0.7;">
+  <img src="data:image/png;base64,{tl_b64}" class="corner corner-tl" style="width: 38mm; opacity: .7;" alt="">
+  <img src="data:image/png;base64,{br_b64}" class="corner corner-br" style="width: 38mm; opacity: .7;" alt="">
 
-  <div class="content-container">
-    <!-- Compact Header -->
-    <div class="header-compact">
-      <div class="header-compact-title">گزارش هفتگی گروه‌ها | بخش اعضای گروه</div>
-      <div class="header-compact-meta">
-        <span>مرکز روانشناسی و سلامت روان</span>
-        <span class="header-compact-tag">پایش تیمی هفتگی</span>
-      </div>
+  <div class="content-container">{compact_header(rc.PAGE2_HEADER, rc.PAGE2_TAG)}
+
+    <div class="section-block grow">{section_header(rc.SEC3)}
+      {"".join(member_card(n) for n in rc.MEMBERS)}
     </div>
-
-    <!-- Section 3: گزارش اعضای گروه -->
-    <div class="section-block" style="flex: 1; display: flex; flex-direction: column;">
-      <div class="section-header">
-        <span class="section-number-pill">۳</span>
-        <h2 class="section-title">گزارش اعضای گروه</h2>
-        <div class="section-decor-line"></div>
-      </div>
-
-      <div class="hint-banner">
-        <span>این بخش به ازای هر یک از اعضای گروه تکمیل می‌گردد. در فایل ورد (DOCX) می‌توانید این قالب را برای اعضای بعدی کپی و تکثیر فرمایید.</span>
-        <span style="font-weight: 600; color: #385E4F;">قالب تکرارپذیر اعضا</span>
-      </div>
-
-      <!-- Member 1 -->
-      <div class="member-card" style="flex: 1; display: flex; flex-direction: column;">
-        <div class="member-card-header">
-          <div class="member-name-row">
-            <span class="member-name-label">نام عضو:</span>
-            <div class="member-name-fill"></div>
-          </div>
-          <span class="member-badge">عضو شماره ۱</span>
-        </div>
-        <div class="member-fields-grid" style="flex: 1; display: flex; flex-direction: column; justify-content: space-between;">
-          <div class="field-group" style="margin-bottom: 1.5mm; flex: 1.1; display: flex; flex-direction: column;">
-            <div class="field-label-bar">
-              <span class="bullet-leaf"></span>
-              <span>شرح فعالیت‌ها و اقدامات انجام‌شده:</span>
-            </div>
-            <div class="writing-area" style="min-height: 18mm; flex: 1;"></div>
-          </div>
-          <div class="field-group" style="margin-bottom: 1.5mm; flex: 0.95; display: flex; flex-direction: column;">
-            <div class="field-label-bar">
-              <span class="bullet-leaf"></span>
-              <span>نیازها و درخواست‌های حمایتی:</span>
-            </div>
-            <div class="writing-area" style="min-height: 14mm; flex: 1;"></div>
-          </div>
-          <div class="field-group" style="margin-bottom: 0; flex: 0.95; display: flex; flex-direction: column;">
-            <div class="field-label-bar">
-              <span class="bullet-leaf"></span>
-              <span>پیشنهادها و برنامه‌های پیش‌رو:</span>
-            </div>
-            <div class="writing-area" style="min-height: 14mm; flex: 1;"></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Member 2 -->
-      <div class="member-card" style="flex: 1; display: flex; flex-direction: column;">
-        <div class="member-card-header">
-          <div class="member-name-row">
-            <span class="member-name-label">نام عضو:</span>
-            <div class="member-name-fill"></div>
-          </div>
-          <span class="member-badge">عضو شماره ۲</span>
-        </div>
-        <div class="member-fields-grid" style="flex: 1; display: flex; flex-direction: column; justify-content: space-between;">
-          <div class="field-group" style="margin-bottom: 1.5mm; flex: 1.1; display: flex; flex-direction: column;">
-            <div class="field-label-bar">
-              <span class="bullet-leaf"></span>
-              <span>شرح فعالیت‌ها و اقدامات انجام‌شده:</span>
-            </div>
-            <div class="writing-area" style="min-height: 18mm; flex: 1;"></div>
-          </div>
-          <div class="field-group" style="margin-bottom: 1.5mm; flex: 0.95; display: flex; flex-direction: column;">
-            <div class="field-label-bar">
-              <span class="bullet-leaf"></span>
-              <span>نیازها و درخواست‌های حمایتی:</span>
-            </div>
-            <div class="writing-area" style="min-height: 14mm; flex: 1;"></div>
-          </div>
-          <div class="field-group" style="margin-bottom: 0; flex: 0.95; display: flex; flex-direction: column;">
-            <div class="field-label-bar">
-              <span class="bullet-leaf"></span>
-              <span>پیشنهادها و برنامه‌های پیش‌رو:</span>
-            </div>
-            <div class="writing-area" style="min-height: 14mm; flex: 1;"></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Footer Page 2 -->
-    <div class="page-footer">
-      <div>محرمانه — ویژه ارزیابی داخلی مرکز سلامت روان</div>
-      <div class="footer-center">گزارش هفتگی اعضای گروه</div>
-      <div class="footer-badge">صفحه ۲ از ۳</div>
-    </div>
+{footer(1)}
   </div>
 </div>
 
 <!-- ==================== PAGE 3 ==================== -->
 <div class="page">
-  <img src="data:image/png;base64,{tl_b64}" class="corner-tl" alt="botanical-tl" style="width: 38mm; opacity: 0.7;">
-  <img src="data:image/png;base64,{br_b64}" class="corner-br" alt="botanical-br" style="width: 44mm; opacity: 0.85;">
+  <img src="data:image/png;base64,{tl_b64}" class="corner corner-tl" style="width: 38mm; opacity: .7;" alt="">
+  <img src="data:image/png;base64,{br_b64}" class="corner corner-br" style="width: 44mm; opacity: .85;" alt="">
 
-  <div class="content-container">
-    <!-- Compact Header -->
-    <div class="header-compact">
-      <div class="header-compact-title">گزارش هفتگی گروه‌ها | چالش‌ها و برنامه‌ریزی آتی</div>
-      <div class="header-compact-meta">
-        <span>مرکز روانشناسی و سلامت روان</span>
-        <span class="header-compact-tag">برنامه‌ریزی و ارزیابی</span>
+  <div class="content-container">{compact_header(rc.PAGE3_HEADER, rc.PAGE3_TAG)}
+
+    <div class="section-block grow">{section_header(rc.SEC4)}
+      {"".join(field(l, 1, 20) for l in rc.SEC4_FIELDS)}
+    </div>
+
+    <div class="section-block">{section_header(rc.SEC5)}
+      <div class="plan-wrap">
+        <table class="plan-table">
+          <thead><tr>{plan_head}</tr></thead>
+          <tbody>{plan_body}</tbody>
+        </table>
       </div>
     </div>
 
-    <!-- Section 4: چالش‌ها و موانع -->
-    <div class="section-block">
-      <div class="section-header">
-        <span class="section-number-pill">۴</span>
-        <h2 class="section-title">چالش‌ها و موانع</h2>
-        <div class="section-decor-line"></div>
-      </div>
-
-      <div class="field-group">
-        <div class="field-label-bar">
-          <span class="bullet-leaf"></span>
-          <span>مشکلات و موانع موجود:</span>
-        </div>
-        <div class="writing-area" style="min-height: 22mm;"></div>
-      </div>
-
-      <div class="field-group">
-        <div class="field-label-bar">
-          <span class="bullet-leaf"></span>
-          <span>موارد نیازمند پیگیری:</span>
-        </div>
-        <div class="writing-area" style="min-height: 22mm;"></div>
-      </div>
-
-      <div class="field-group">
-        <div class="field-label-bar">
-          <span class="bullet-leaf"></span>
-          <span>راهکارهای پیشنهادی:</span>
-        </div>
-        <div class="writing-area" style="min-height: 22mm;"></div>
-      </div>
+    <div class="sign-card">{sign_boxes}
     </div>
-
-    <!-- Section 5: برنامه هفته آینده -->
-    <div class="section-block" style="margin-top: 2mm;">
-      <div class="section-header">
-        <span class="section-number-pill">۵</span>
-        <h2 class="section-title">برنامه هفته آینده</h2>
-        <div class="section-decor-line"></div>
-      </div>
-
-      <table class="plan-table">
-        <thead>
-          <tr>
-            <th style="width: 8%; text-align: center;">ردیف</th>
-            <th style="width: 48%;">اقدامات پیشنهادی</th>
-            <th style="width: 24%;">مسئول انجام</th>
-            <th style="width: 20%; text-align: center;">زمان‌بندی</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td style="text-align: center; font-weight: 600;">۱</td>
-            <td style="height: 9mm;"></td>
-            <td></td>
-            <td style="text-align: center;"></td>
-          </tr>
-          <tr>
-            <td style="text-align: center; font-weight: 600;">۲</td>
-            <td style="height: 9mm;"></td>
-            <td></td>
-            <td style="text-align: center;"></td>
-          </tr>
-          <tr>
-            <td style="text-align: center; font-weight: 600;">۳</td>
-            <td style="height: 9mm;"></td>
-            <td></td>
-            <td style="text-align: center;"></td>
-          </tr>
-          <tr>
-            <td style="text-align: center; font-weight: 600;">۴</td>
-            <td style="height: 9mm;"></td>
-            <td></td>
-            <td style="text-align: center;"></td>
-          </tr>
-          <tr>
-            <td style="text-align: center; font-weight: 600;">۵</td>
-            <td style="height: 9mm;"></td>
-            <td></td>
-            <td style="text-align: center;"></td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <!-- Signatures Card -->
-    <div class="sign-card">
-      <div class="sign-box">
-        <div>
-          <div class="sign-title">
-            <span class="bullet-leaf"></span>
-            <span>امضا و تأیید سرگروه</span>
-          </div>
-          <div class="sign-desc">صحت مطالب و گزارش‌های ثبت‌شده فوق مورد تأیید است.</div>
-        </div>
-        <div class="sign-notes-box" style="height: 15mm; padding: 2mm; font-size: 7.5pt; color: #8F9E94;">
-          ملاحظات تکمیلی سرگروه:
-        </div>
-        <div class="sign-area-line">
-          <span>نام و نام خانوادگی:</span>
-          <span>امضا و تاریخ:</span>
-        </div>
-      </div>
-
-      <div class="sign-box">
-        <div>
-          <div class="sign-title">
-            <span class="bullet-leaf"></span>
-            <span>تأییدیه و بازخورد سوپروایزر / مدیریت مرکز</span>
-          </div>
-          <div class="sign-desc">ملاحظات نظارتی، ارزیابی کیفی و تأمین منابع.</div>
-        </div>
-        <div class="sign-notes-box" style="height: 15mm; padding: 2mm; font-size: 7.5pt; color: #8F9E94;">
-          دستور اقدامات نظارتی و بازخورد مدیریت:
-        </div>
-        <div class="sign-area-line">
-          <span>نام مسئول / سوپروایزر:</span>
-          <span>امضا و مهر مرکز:</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Footer Page 3 -->
-    <div class="page-footer">
-      <div>مرکز مشاوره، روانشناسی و سلامت روان — پرونده محرمانه سازمانی</div>
-      <div class="footer-center">پایان گزارش هفتگی</div>
-      <div class="footer-badge">صفحه ۳ از ۳</div>
-    </div>
+    <div class="spacer"></div>
+{footer(2)}
   </div>
 </div>
 
@@ -838,28 +504,50 @@ html_content = f"""<!DOCTYPE html>
 </html>
 """
 
-with open('weekly_report_psychology.html', 'w', encoding='utf-8') as f:
-    f.write(html_content)
 
-chrome_cmd = [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "--headless=new",
-    "--disable-gpu",
-    "--run-all-compositor-stages-before-draw",
-    "--print-to-pdf=weekly_report_psychology.pdf",
-    "weekly_report_psychology.html"
-]
+def find_chrome():
+    candidates = [os.environ.get("CHROME_BIN")]
+    candidates += sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux*/chrome"), reverse=True)
+    candidates += sorted(glob.glob(os.path.expanduser(
+        "~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome")), reverse=True)
+    candidates += [
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ]
+    candidates += [shutil.which(n) for n in
+                   ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome")]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    sys.exit("Chrome/Chromium not found - set CHROME_BIN")
 
-subprocess.run(chrome_cmd, check=True)
 
-# Re-render previews
-pdf = pdfium.PdfDocument("weekly_report_psychology.pdf")
-for i, page in enumerate(pdf):
-    img = page.render(scale=2).to_pil()
-    img.save(f"preview/page_{i+1}.png")
-    w = 600
-    h = int(img.height * w / img.width)
-    thumb = img.resize((w, h), Image.LANCZOS)
-    thumb.save(f"preview/page_{i+1}_thumb.png")
+def main():
+    with open(OUT_HTML, "w", encoding="utf-8") as f:
+        f.write(html_content)
 
-print("Updated PDF and previews successfully!")
+    subprocess.run([
+        find_chrome(),
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--no-pdf-header-footer",
+        "--run-all-compositor-stages-before-draw",
+        "--virtual-time-budget=10000",
+        f"--print-to-pdf={os.path.abspath(OUT_PDF)}",
+        "file://" + os.path.abspath(OUT_HTML),
+    ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    pdf = pdfium.PdfDocument(OUT_PDF)
+    os.makedirs("preview", exist_ok=True)
+    for i, page in enumerate(pdf):
+        img = page.render(scale=2).to_pil()
+        img.save(f"preview/page_{i + 1}.png")
+        w = 600
+        thumb = img.resize((w, int(img.height * w / img.width)), Image.LANCZOS)
+        thumb.save(f"preview/page_{i + 1}_thumb.png")
+    print(f"Saved {OUT_PDF} ({len(pdf)} pages) and previews.")
+
+
+if __name__ == "__main__":
+    main()
